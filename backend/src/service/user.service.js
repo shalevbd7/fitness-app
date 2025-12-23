@@ -2,6 +2,9 @@ import User from "../models/user.model.js";
 
 /**
  * Retrieves the basic user profile and dietary targets, excluding sensitive data.
+ * * @param {string} userId - The MongoDB ObjectId of the user.
+ * @returns {Promise<Object>} The sanitized user object containing profile details.
+ * @throws {Error} If the user is not found.
  */
 export const getUserProfile = async (userId) => {
   const user = await User.findById(userId).select("-password");
@@ -20,6 +23,12 @@ export const getUserProfile = async (userId) => {
 
 /**
  * Updates user profile details, tracks weight history, and handles UI preferences.
+ * * This service handles data normalization to support different payload structures
+ * (flat objects vs. nested 'profile' objects) and ensures historical data integrity.
+ * * @param {string} userId - The MongoDB ObjectId of the user.
+ * @param {Object} updates - The update payload (can be flat or nested under 'profile').
+ * @returns {Promise<Object>} The updated and sanitized user profile.
+ * @throws {Error} If the user is not found.
  */
 export const updateProfile = async (userId, updates) => {
   const user = await User.findById(userId);
@@ -28,39 +37,56 @@ export const updateProfile = async (userId, updates) => {
     throw new Error("User not found");
   }
 
-  // Handle Weight History: Log an entry if the weight value has changed
-  if (updates.profile && updates.profile.weight) {
-    const newWeight = Number(updates.profile.weight);
+  // Data Normalization:
+  // Determine if the incoming data is wrapped in a 'profile' property or sent as a flat object.
+  // This ensures the service works regardless of how the frontend structures the request.
+  const dataToUpdate = updates.profile || updates;
+
+  // --- 1. Weight History Management ---
+  // We only modify the history if a weight value is provided and it differs from the current weight.
+  if (dataToUpdate.weight !== undefined) {
+    const newWeight = Number(dataToUpdate.weight);
+
+    // Strict comparison to prevent duplicate history entries for the same weight
     if (user.profile.weight !== newWeight) {
       user.weightHistory.push({
         weight: newWeight,
         date: new Date(),
       });
+
+      // Update the current reference weight
+      user.profile.weight = newWeight;
     }
   }
 
-  // Handle Theme updates
+  // --- 2. Dynamic Field Updates ---
+  // whitelist of fields allowed to be updated directly in the profile object.
+  const allowedFields = [
+    "height",
+    "age",
+    "gender",
+    "dailyCalorieTarget",
+    "dailyProteinTarget",
+    "dailyCarbTarget",
+    "dailyFatTarget",
+    "theme",
+  ];
+
+  // Iterate over allowed fields to update them if present in the payload
+  allowedFields.forEach((field) => {
+    if (dataToUpdate[field] !== undefined) {
+      user.profile[field] = dataToUpdate[field];
+    }
+  });
+
+  // --- 3. Root Level / Specific Theme Handling ---
+  // Handle 'theme' if it was sent at the root level of the update object
   if (updates.theme) {
     user.profile.theme = updates.theme;
   }
 
-  // Update specific profile target fields
-  if (updates.profile) {
-    const p = updates.profile;
-    if (p.weight !== undefined) user.profile.weight = p.weight;
-    if (p.height !== undefined) user.profile.height = p.height;
-    if (p.age !== undefined) user.profile.age = p.age;
-    if (p.dailyCalorieTarget !== undefined)
-      user.profile.dailyCalorieTarget = p.dailyCalorieTarget;
-    if (p.dailyProteinTarget !== undefined)
-      user.profile.dailyProteinTarget = p.dailyProteinTarget;
-    if (p.dailyCarbTarget !== undefined)
-      user.profile.dailyCarbTarget = p.dailyCarbTarget;
-    if (p.dailyFatTarget !== undefined)
-      user.profile.dailyFatTarget = p.dailyFatTarget;
-  }
-
-  // Explicitly notify Mongoose about the nested object update
+  // Notify Mongoose that the nested 'profile' object has been modified.
+  // This is crucial for mixed types or nested objects to ensure the 'save' hook triggers correctly.
   user.markModified("profile");
 
   await user.save();
